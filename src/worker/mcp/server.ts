@@ -72,6 +72,20 @@ Work with content: Markdown is the source of truth. Use get_note_context for lin
 
 Respect access: Reads require notes:read; most writes require notes:write; moving a note to trash requires separately granted notes:trash and is reversible. A /s/<slug> URL is a public share, possibly password protected or expiring. Use get_note_share to inspect a share, and create or change public sharing only when the user explicitly asks. Read attachments in chunks; uploads have storage, quota, and rate limits. Backup tools can run existing targets but cannot reveal or change credentials. Permanent purge and account or authentication management are not exposed.`
 
+// The advertised JSON Schema for this object has additionalProperties: false, so
+// every key the handler returns must be declared here or strict clients reject it.
+export const searchOutputSchema = z.object({
+  results: z.array(z.object({ id: z.string(), title: z.string(), url: z.string().url() })),
+  mode: z.string(),
+})
+
+export function searchToolValue(found: { results: Array<{ id: string; title: string; url: string }>; mode: string }) {
+  return {
+    results: found.results.map(({ id, title, url }) => ({ id, title, url })),
+    mode: found.mode,
+  }
+}
+
 const generalOutputSchema = z.object({ data: z.record(z.string(), z.unknown()) })
 const operationId = z.string().min(8).max(128).describe('Stable UUID or unique request key; reuse only for an exact retry')
 const noteId = z.string().refine(isValidId, 'Invalid Inkstone note id')
@@ -100,9 +114,7 @@ export function createInkstoneMcpServer(options: InkstoneMcpServerOptions): McpS
         mode: z.enum(['auto', 'lexical', 'semantic', 'hybrid']).default('auto')
           .describe('auto: hybrid when AI semantic search is enabled, else keyword search; lexical: keyword only; semantic: meaning only; hybrid: both merged'),
       }),
-      outputSchema: z.object({
-        results: z.array(z.object({ id: z.string(), title: z.string(), url: z.string().url() })),
-      }),
+      outputSchema: searchOutputSchema,
       annotations: readOnlyAnnotations(),
     },
     async ({ query, mode }, ctx) => safeTool(async () => {
@@ -114,11 +126,7 @@ export function createInkstoneMcpServer(options: InkstoneMcpServerOptions): McpS
         options.ftsEnabled,
         { query, limit: 8, mode },
       )
-      const value = {
-        results: found.results.map(({ id, title, url }) => ({ id, title, url })),
-        mode: found.mode,
-      }
-      return structured(value)
+      return structured(searchToolValue(found))
     }),
   )
 
