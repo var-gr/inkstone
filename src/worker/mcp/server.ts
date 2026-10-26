@@ -73,16 +73,16 @@ Work with content: Markdown is the source of truth. Use get_note_context for lin
 Respect access: Reads require notes:read; most writes require notes:write; moving a note to trash requires separately granted notes:trash and is reversible. A /s/<slug> URL is a public share, possibly password protected or expiring. Use get_note_share to inspect a share, and create or change public sharing only when the user explicitly asks. Read attachments in chunks; uploads have storage, quota, and rate limits. Backup tools can run existing targets but cannot reveal or change credentials. Permanent purge and account or authentication management are not exposed.`
 
 // The advertised JSON Schema for this object has additionalProperties: false, so
-// every key the handler returns must be declared here or strict clients reject it.
+// the handler must not return any key that is not declared here, or strict MCP
+// clients/portals reject the call with -32602. Only return keys that older cached
+// copies of this schema also allow (i.e. just `results`).
 export const searchOutputSchema = z.object({
   results: z.array(z.object({ id: z.string(), title: z.string(), url: z.string().url() })),
-  mode: z.string(),
 })
 
-export function searchToolValue(found: { results: Array<{ id: string; title: string; url: string }>; mode: string }) {
+export function searchToolValue(found: { results: Array<{ id: string; title: string; url: string }> }) {
   return {
     results: found.results.map(({ id, title, url }) => ({ id, title, url })),
-    mode: found.mode,
   }
 }
 
