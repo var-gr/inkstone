@@ -17,6 +17,8 @@ import { requireAuth } from '../middleware/auth'
 export const searchRoutes = new Hono<AppBindings>()
 
 const GRAPH_EDGE_CANDIDATE_LIMIT = 10_000
+// D1 caps bound parameters at 100 per statement; each chunk query also binds user id and limit.
+const GRAPH_ID_CHUNK_SIZE = 90
 
 
 export interface ParsedQuery {
@@ -500,25 +502,40 @@ searchRoutes.get('/graph', requireAuth, async (c) => {
   const unresolved = new Map<string, { title: string; sources: Set<string> }>()
   const tagsByNote = new Map<string, Array<{ name: string; color: string | null }>>()
   if (ids.length) {
-    const placeholders = ids.map(() => '?').join(',')
-    const [linkResult, tagResult] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT source_note_id, target_note_id, target_key, target_title FROM links
-         WHERE user_id = ? AND source_note_id IN (${placeholders})
-           AND (target_note_id IN (${placeholders})${includeUnresolved ? ' OR target_note_id IS NULL' : ''})
-         ORDER BY source_note_id ASC, target_key ASC LIMIT ?`,
-      ).bind(userId, ...ids, ...ids, GRAPH_EDGE_CANDIDATE_LIMIT + 1).all<{
-        source_note_id: string
-        target_note_id: string | null
-        target_key: string
-        target_title: string
-      }>(),
-      c.env.DB.prepare(
-        `SELECT nt.note_id, t.name, t.color FROM note_tags nt
-         JOIN tags t ON t.id = nt.tag_id AND t.user_id = ?
-         WHERE nt.note_id IN (${placeholders}) ORDER BY t.name COLLATE NOCASE ASC`,
-      ).bind(userId, ...ids).all<{ note_id: string; name: string; color: string | null }>(),
+    // D1 allows at most 100 bound parameters per statement, so look up links and tags
+    // in chunks of ids instead of binding every id (twice) in a single query.
+    const chunks: string[][] = []
+    for (let i = 0; i < ids.length; i += GRAPH_ID_CHUNK_SIZE) chunks.push(ids.slice(i, i + GRAPH_ID_CHUNK_SIZE))
+    type GraphLinkRow = {
+      source_note_id: string
+      target_note_id: string | null
+      target_key: string
+      target_title: string
+    }
+    const [linkChunks, tagChunks] = await Promise.all([
+      Promise.all(chunks.map((chunk) =>
+        c.env.DB.prepare(
+          `SELECT source_note_id, target_note_id, target_key, target_title FROM links
+           WHERE user_id = ? AND source_note_id IN (${chunk.map(() => '?').join(',')})
+             AND (target_note_id IS NOT NULL${includeUnresolved ? ' OR target_note_id IS NULL' : ''})
+           ORDER BY source_note_id ASC, target_key ASC LIMIT ?`,
+        ).bind(userId, ...chunk, GRAPH_EDGE_CANDIDATE_LIMIT + 1).all<GraphLinkRow>(),
+      )),
+      Promise.all(chunks.map((chunk) =>
+        c.env.DB.prepare(
+          `SELECT nt.note_id, t.name, t.color FROM note_tags nt
+           JOIN tags t ON t.id = nt.tag_id AND t.user_id = ?
+           WHERE nt.note_id IN (${chunk.map(() => '?').join(',')}) ORDER BY t.name COLLATE NOCASE ASC`,
+        ).bind(userId, ...chunk).all<{ note_id: string; name: string; color: string | null }>(),
+      )),
     ])
+    const linkResult = {
+      results: linkChunks
+        .flatMap((result) => result.results)
+        // Targets must be among the returned nodes (this used to be an IN (...) filter in SQL).
+        .filter((link) => link.target_note_id === null || known.has(link.target_note_id)),
+    }
+    const tagResult = { results: tagChunks.flatMap((result) => result.results) }
     if (linkResult.results.length > GRAPH_EDGE_CANDIDATE_LIMIT) truncated = true
     const seen = new Set<string>()
     for (const link of linkResult.results.slice(0, GRAPH_EDGE_CANDIDATE_LIMIT)) {
